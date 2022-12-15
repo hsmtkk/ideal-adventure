@@ -15,7 +15,6 @@ import (
 	"cloud.google.com/go/storage"
 	"github.com/GoogleCloudPlatform/functions-framework-go/functions"
 	"github.com/cloudevents/sdk-go/v2/event"
-	"google.golang.org/api/idtoken"
 )
 
 func init() {
@@ -41,6 +40,10 @@ func imageUploaded(ctx context.Context, e event.Event) error {
 	if endpointID == "" {
 		return fmt.Errorf("ENDPOINT_ID env var is not defined")
 	}
+	token, err := getToken()
+	if err != nil {
+		log.Fatal(err)
+	}
 	var storageData storageObjectData
 	if err := e.DataAs(&storageData); err != nil {
 		return fmt.Errorf("event.Event.DataAs failed; %w", err)
@@ -49,10 +52,43 @@ func imageUploaded(ctx context.Context, e event.Event) error {
 	if err != nil {
 		return err
 	}
-	if err := callEndpoint(ctx, projectID, endpointID, imageBytes); err != nil {
+	if err := callEndpoint(ctx, projectID, endpointID, token, imageBytes); err != nil {
 		return err
 	}
 	return nil
+}
+
+/*
+https://cloud.google.com/functions/docs/securing/function-identity
+curl "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token?scopes=SCOPES" \
+  -H "Metadata-Flavor: Google"
+*/
+
+type tokenSchema struct {
+	AccessToken string `json:"access_token"`
+}
+
+func getToken() (string, error) {
+	url := fmt.Sprintf("http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token?scopes=%s", "https://www.googleapis.com/auth/cloud-platform")
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return "", fmt.Errorf("http.NewRequest failed; %w", err)
+	}
+	req.Header.Add("Metadata-Flavor", "Google")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("http.Client.Do failed; %w", err)
+	}
+	defer resp.Body.Close()
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("io.ReadAll failed; %w", err)
+	}
+	var token tokenSchema
+	if err := json.Unmarshal(respBytes, &token); err != nil {
+		return "", fmt.Errorf("json.Unmarshal failed; %w", err)
+	}
+	return token.AccessToken, nil
 }
 
 func getImage(ctx context.Context, bucket, name string) ([]byte, error) {
@@ -74,7 +110,7 @@ func getImage(ctx context.Context, bucket, name string) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-type schema struct {
+type requestSchema struct {
 	Instances  []instance `json:"instances"`
 	Parameters parameters `json:"parameters"`
 }
@@ -88,11 +124,42 @@ type parameters struct {
 	MaxPredictions      int     `json:"maxPredictions"`
 }
 
-func callEndpoint(ctx context.Context, projectID, endpointID string, imageBytes []byte) error {
+/*
+response sample
+
+{
+  "predictions": [
+    {
+      "confidences": [
+        0.999999285
+      ],
+      "ids": [
+        "5378020883975634944"
+      ],
+      "displayNames": [
+        "apple"
+      ]
+    }
+  ],
+  "deployedModelId": "2683525253354749952",
+  "model": "projects/864499401284/locations/us-central1/models/116743945614000128",
+  "modelDisplayName": "untitled_1671069571418",
+  "modelVersionId": "1"
+}
+*/
+
+type responseSchema struct {
+	Predictions []prediction `json:"predictions"`
+}
+
+type prediction struct {
+	DisplayNames []string `json:"displayNames"`
+}
+
+func callEndpoint(ctx context.Context, projectID, endpointID, token string, imageBytes []byte) error {
 	log.Println("callEndpoint")
-	audience := "https://us-central1-aiplatform.googleapis.com"
-	targetURL := fmt.Sprintf("https://us-central1-aiplatform.googleapis.com/v1/projects/%s/locations/us-central1/endpoints/%s:predict", projectID, endpointID)
-	reqBody, err := json.Marshal(schema{
+	url := fmt.Sprintf("https://us-central1-aiplatform.googleapis.com/v1/projects/%s/locations/us-central1/endpoints/%s:predict", projectID, endpointID)
+	reqBody, err := json.Marshal(requestSchema{
 		Instances: []instance{{
 			Content: base64.StdEncoding.EncodeToString(imageBytes),
 		}},
@@ -104,13 +171,15 @@ func callEndpoint(ctx context.Context, projectID, endpointID string, imageBytes 
 	if err != nil {
 		return fmt.Errorf("json.Marshal failed; %w", err)
 	}
-	clt, err := idtoken.NewClient(ctx, audience)
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(reqBody))
 	if err != nil {
-		return fmt.Errorf("idtoken.NewClient failed; %w", err)
+		return fmt.Errorf("http.NewRequest failed; %w", err)
 	}
-	resp, err := clt.Post(targetURL, "application/json", bytes.NewReader(reqBody))
+	req.Header.Add("Content-Type", "application/json")
+	req.Header.Add("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("http.Client.Post failed; %w", err)
+		return fmt.Errorf("http.Client.Do failed; %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -121,5 +190,10 @@ func callEndpoint(ctx context.Context, projectID, endpointID string, imageBytes 
 		return fmt.Errorf("io.ReadAll failed; %w", err)
 	}
 	log.Printf("%v", string(respBytes))
+	var apiResponse responseSchema
+	if err := json.Unmarshal(respBytes, &apiResponse); err != nil {
+		return fmt.Errorf("json.Unmarshal failed; %w", err)
+	}
+	log.Printf("result: %s\n", apiResponse.Predictions[0].DisplayNames[0])
 	return nil
 }

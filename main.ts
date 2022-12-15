@@ -91,6 +91,8 @@ class MyStack extends TerraformStack {
           'PROJECT_ID': project,
           'ENDPOINT_ID': '7212484016908271616',
         },
+        minInstanceCount: 0,
+        maxInstanceCount: 1,
         serviceAccountEmail: functionAccount.email,
       },
     });
