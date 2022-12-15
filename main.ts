@@ -18,6 +18,22 @@ class MyStack extends TerraformStack {
       region,
     });
 
+    const functionAccount = new google.serviceAccount.ServiceAccount(this, 'function-account', {
+      accountId: 'function-account',
+    });
+
+    new google.projectIamBinding.ProjectIamBinding(this, 'function-account-ai', {
+      members: [`serviceAccount:${functionAccount.email}`],
+      project,
+      role: 'roles/aiplatform.user',
+    });
+
+    new google.projectIamBinding.ProjectIamBinding(this, 'function-account-storage', {
+      members: [`serviceAccount:${functionAccount.email}`],
+      project,
+      role: 'roles/storage.objectAdmin',
+    });
+
     new google.storageBucket.StorageBucket(this, 'dataset', {
       location: region,
       name: `dataset-${project}`,
@@ -75,9 +91,30 @@ class MyStack extends TerraformStack {
           'PROJECT_ID': project,
           'ENDPOINT_ID': '7212484016908271616',
         },
+        serviceAccountEmail: functionAccount.email,
       },
     });
 
+/*
+data "google_storage_project_service_account" "gcs_account" {
+}
+
+# To use GCS CloudEvent triggers, the GCS service account requires the Pub/Sub Publisher(roles/pubsub.publisher) IAM role in the specified project.
+# (See https://cloud.google.com/eventarc/docs/run/quickstart-storage#before-you-begin)
+resource "google_project_iam_member" "gcs-pubsub-publishing" {
+  project = "my-project-name"
+  role    = "roles/pubsub.publisher"
+  member  = "serviceAccount:${data.google_storage_project_service_account.gcs_account.email_address}"
+}
+*/
+
+    const storageAccount = new google.dataGoogleStorageProjectServiceAccount.DataGoogleStorageProjectServiceAccount(this, 'storage-account');
+
+    new google.projectIamMember.ProjectIamMember(this, 'storage-account-pubsub', {
+      member: `serviceAccount:${storageAccount.emailAddress}`,
+      project,
+      role: 'roles/pubsub.publisher',
+    });
   }
 }
 
